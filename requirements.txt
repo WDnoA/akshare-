@@ -1,0 +1,5 @@
+akshare
+TA-Lib
+numpy
+pandas
+pytz 

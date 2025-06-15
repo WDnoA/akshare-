@@ -1,0 +1,9 @@
+
+# 忽略 nrxxg 目录
+rxxg/
+
+# 忽略本地配置文件
+quant_data/
+
+# 忽略所有 .log 文件
+*.log
