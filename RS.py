@@ -1,6 +1,6 @@
 
-#2.0
-# 优化了数据获取模块和得分权重
+#2.1
+# 优化得分计算和权重设置
 # -*- coding: utf-8 -*-
 
 """
@@ -3315,7 +3315,7 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
         strength_score = (df['收盘强度'] - params.closing_strength_threshold) * 100
         closing_strength_score = np.minimum(strength_score, 8)
         
-        # 1.2 均线关系评分 (0-6分) - 价格站上均线系统是强势信号
+        # 1.2 均线关系评分 (0-8分) - 价格站上均线系统是强势信号
         # 均线多头排列是强势市场的重要特征
         ma_score = np.zeros(len(df))
         if all(col in df.columns for col in ['MA5', 'MA10', 'MA20']):
@@ -3329,7 +3329,7 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
                       ma5_above_ma10.astype(int) * 2 + \
                       ma10_above_ma20.astype(int) * 2
             
-            # 优化：均线拐头向上更有利于短线上涨
+            # 均线拐头向上更有利于短线上涨
             ma5_turning_up = (df['MA5'] > df['MA5'].shift(1)) & (df['MA5'].shift(1) <= df['MA5'].shift(2))
             ma_score += ma5_turning_up.astype(int) * 2
             ma_score = np.minimum(ma_score, 8)  # 最高提升到8分
@@ -3342,7 +3342,7 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
         if 'Pattern_Score' in df.columns:
             pattern_score = np.minimum(df['Pattern_Score'], 6)
         else:
-            # 优化：增加更多K线形态权重，特别是强烈看涨形态
+            # 增加更多K线形态权重，特别是强烈看涨形态
             # 锤子线形态 - 下跌趋势中出现锤子线是反转信号
             if 'Pattern_Hammer' in df.columns:
                 pattern_score += df['Pattern_Hammer'].astype(int) * 3
@@ -3360,52 +3360,64 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
                 bullish_engulfing = df['Pattern_Engulfing'] & (df['Close'] > df['Open'])
                 pattern_score += bullish_engulfing.astype(int) * 4  # 提高看涨吞没形态权重
                 
-            # 新增：穿刺形态 - 看涨反转信号
+            # 刺形态 - 看涨反转信号
             if 'Pattern_Piercing' in df.columns:
                 pattern_score += df['Pattern_Piercing'].astype(int) * 3
                 
             pattern_score = np.minimum(pattern_score, 6)
         
-        # 1.4 新增：短期价格动量 (0-6分)
+        # 1.4 短期价格动量 (0-8分)
         momentum_score = np.zeros(len(df))
         if 'Close' in df.columns:
             # 计算最近3日涨幅
             recent_gain = (df['Close'] / df['Close'].shift(3) - 1) * 100
             # 温和上涨(1%-3%)最适合次日继续上涨
             momentum_score = np.where(
-                (recent_gain > 1) & (recent_gain < 3), 
-                recent_gain, 
+                recent_gain < 0, 
+                np.where(recent_gain > -2, 1.5, 0),  # 微跌处理：抗跌信号
+                
                 np.where(
-                    (recent_gain >= 3) & (recent_gain < 5),
-                    3,
+                    recent_gain <= 1,  # 0-1%区间
+                    recent_gain * 4,   # 线性递增：0%→0分，1%→4分
+                    
                     np.where(
-                        (recent_gain >= 0) & (recent_gain <= 1),
-                        1,
-                        0  # 过度上涨或下跌都不加分
+                        recent_gain <= 3,  # 1%-3%核心区间
+                        8 - np.abs(recent_gain - 2) * 2,  # 线性递增：1%→4分，3%→8分
+                        
+                        np.where(
+                            recent_gain <= 5,  # 3%-5%区间
+                            6 - (recent_gain - 3) * 2,  # 快速递减
+                            
+                            np.where(
+                                recent_gain <= 7,  # 5%-7%区间
+                                2 - (recent_gain - 5) * 1,  # 缓速递减
+                                0  # >7%过度上涨
+                            )
+                        )
                     )
                 )
             )
-            momentum_score = np.minimum(momentum_score, 6)
+            momentum_score = np.minimum(momentum_score, 8)
         
-        # 综合价格趋势得分 - 确保不超过20分
-        df['价格趋势得分'] = np.minimum(closing_strength_score + ma_score + pattern_score + momentum_score, 20)
+        # 综合价格趋势得分 - 确保不超过30分
+        df['价格趋势得分'] = np.minimum(closing_strength_score + ma_score + pattern_score + momentum_score, 30)
         
         # =====================================================================
         # 2. 量能评分 (最高15分) - 评估成交量特征
         # =====================================================================
         
-        # 2.1 量比评分 (0-6分) - 放量但不过度
+        # 2.1 量比评分 (0-5分) - 放量但不过度
         # 量比是短线交易中判断主力资金进出的重要指标
         vol_score = np.zeros(len(df))
         if '量比' in df.columns:
-            # 优化：量比理想区间调整为1.2-2.0，轻微放量更有利于次日上涨
+            # 量比理想区间调整为1.2-2.0，轻微放量更有利于次日上涨
             vol_ratio_score = np.where(
                 (df['量比'] >= 1.2) & (df['量比'] <= 2.0), 
-                (df['量比'] - 1.0) * 6, 
+                (df['量比'] - 1.0) * 5, 
                 np.where(
                     df['量比'] > 2.0, 
-                    6 - (df['量比'] - 2.0) * 3.0,  # 量比过大减分更多，很可能是出货
-                    (df['量比'] / 1.2) * 3  # 量比小于1.2时得分较低
+                    5 - (df['量比'] - 2.0) * 4.0,  # 量比过大减分更多，很可能是出货
+                    (df['量比'] / 1.2) * 2  # 量比小于1.2时得分较低
                 )
             )
             # 负分处理：量比过大(>2.5)可能是出货，给予负分
@@ -3414,9 +3426,9 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
                 -2,  # 量比过大，给予负分
                 vol_ratio_score
             )
-            vol_score += np.maximum(-2, np.minimum(vol_ratio_score, 6))
+            vol_score += np.maximum(-2, np.minimum(vol_ratio_score, 5))
         
-        # 2.2 资金流向评分 (0-5分) - 使用高级资金流向指标
+        # 2.2 资金流向评分 (0-9分) - 使用高级资金流向指标
         vol_flow_score = np.zeros(len(df))
         
         # MFI资金流向指标 - 资金流入是上涨的重要支撑
@@ -3424,10 +3436,10 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
             # 优化：重点关注MFI超卖区间反弹，这是强势信号
             vol_flow_score += np.where(
                 (df['MFI'] > 20) & (df['MFI'] < 70),  # MFI在理想区间
-                3,  # 中性区间得分适中
+                3,  # 中性区间
                 np.where(
                     (df['MFI'] <= 20) & (df['MFI'] > df['MFI'].shift(1)),  # MFI在超卖区且回升
-                    6,  # 超卖反弹得分提高
+                    5,  # 超卖反弹
                     np.where(
                         (df['MFI'] <= 20),  # 超卖但未反弹
                         1,
@@ -3444,13 +3456,13 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
                 )
             )
             
-            # 新增：MFI金叉死叉判断
+            # MFI金叉死叉判断
             mfi_golden_cross = (df['MFI'] > 20) & (df['MFI'].shift(1) <= 20)  # MFI金叉20
-            vol_flow_score += np.where(mfi_golden_cross, 2, 0)  # MFI金叉额外加分
+            vol_flow_score += np.where(mfi_golden_cross, 1, 0)  # MFI金叉额外加分
         
         # CMF钱德勒资金流量 - 正值表示资金流入
         if 'CMF' in df.columns:
-            # 优化：资金由流出转为流入是重要信号
+            # 资金由流出转为流入是重要信号
             cmf_turn_positive = (df['CMF'] > 0) & (df['CMF'].shift(1) <= 0)
             vol_flow_score += np.where(
                 cmf_turn_positive,  # 资金由流出转为流入
@@ -3466,11 +3478,11 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
                 )
             )
         
-        # 将资金流向得分限制在0-5分范围内
-        vol_flow_score = np.minimum(vol_flow_score, 5)
+        # 将资金流向得分限制在0-10分范围内
+        vol_flow_score = np.minimum(vol_flow_score, 9)
         
         
-        # 2.3 量价配合评分 (0-4分) - 价量同步是强势特征
+        # 2.3 量价配合评分 (0-6分) - 价量同步是强势特征
         vol_price_score = np.zeros(len(df))
         
         # 成交量震荡指标
@@ -3492,25 +3504,25 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
             price_up = df['Close'] > df['Close'].shift(1)  # 价格上涨
             vol_up = df['Volume'] > df['Volume'].shift(1)  # 成交量增加
             
-            # 优化：量价配合中，缩量上涨也是可取的短线形态
+            # 量价配合中，缩量上涨也是可取的短线形态
             vol_price_match = price_up & vol_up  # 量价同步上涨
             vol_price_score += vol_price_match.astype(int) * 2
             
-            # 新增：缩量上涨形态，表明持筹者坚定
+            # 缩量上涨形态，表明持筹者坚定
             shrinking_vol_up = price_up & ~vol_up & (df['Volume'] > df['Volume'].rolling(5).mean() * 0.7)
             vol_price_score += shrinking_vol_up.astype(int) * 1
             
-            # 限制在0-4分范围内
-            vol_price_score = np.minimum(vol_price_score, 4)
+            # 限制在0-6分范围内
+            vol_price_score = np.minimum(vol_price_score, 6)
         
         # 综合量能得分 - 确保不超过15分
-        df['量能得分'] = np.minimum(vol_score + vol_flow_score + vol_price_score, 15)
+        df['量能得分'] = np.minimum(vol_score + vol_flow_score + vol_price_score, 20)
         
         # =====================================================================
-        # 3. 技术指标评分 (最高25分) - 评估多种技术指标
+        # 3. 技术指标评分 (最高30分) - 评估多种技术指标
         # =====================================================================
         
-        # 3.1 RSI指标评分 (0-8分) - 关注超买超卖和金叉
+        # 3.1 RSI指标评分 (0-10分) - 关注超买超卖和金叉
         # RSI是判断超买超卖的重要指标，也是短线交易的重要参考
         rsi_score = np.zeros(len(df))
         if 'RSI' in df.columns:
@@ -3531,16 +3543,16 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
             
             # RSI金叉额外加分 - RSI金叉是强势信号
             if 'RSI_GoldenCross' in df.columns:
-                rsi_score += df['RSI_GoldenCross'].astype(int) * 2
+                rsi_score += df['RSI_GoldenCross'].astype(int) * 1
                 
             # 超卖区反弹额外加分
             if 'RSI_OversoldEntry' in df.columns:
                 rsi_score += df['RSI_OversoldEntry'].astype(int) * 2
                 
             # 限制在0-8分范围内
-            rsi_score = np.minimum(rsi_score, 8)
+            rsi_score = np.minimum(rsi_score, 10)
         
-        # 3.2 MACD指标评分 (0-7分)
+        # 3.2 MACD指标评分 (0-9分)
         # MACD是判断中长期趋势的重要指标
         macd_score = np.zeros(len(df))
         if all(col in df.columns for col in ['MACD', 'MACD_Signal', 'MACD_Hist']):
@@ -3565,9 +3577,9 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
                 macd_score += df['MACD_GoldenCross'].astype(int) * 2
                 
             # 限制在0-7分范围内
-            macd_score = np.minimum(macd_score, 7)
+            macd_score = np.minimum(macd_score, 9)
         
-        # 3.3 KDJ指标评分 (0-5分) - 新增KDJ评分
+        # 3.3 KDJ指标评分 (0-6分) 
         kdj_score = np.zeros(len(df))
         if all(col in df.columns for col in ['K', 'D', 'J']):
             # KDJ金叉
@@ -3583,7 +3595,7 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
             kdj_score += kdj_bullish.astype(int) * 1
             
             # 限制在0-5分范围内
-            kdj_score = np.minimum(kdj_score, 5)
+            kdj_score = np.minimum(kdj_score, 6)
         
         # 3.4 ADX趋势强度指标评分 (0-5分)
         # ADX是判断趋势强度的重要指标
@@ -3607,9 +3619,9 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
             # 限制在0-5分范围内
             adx_score = np.minimum(adx_score, 5)
         
-        # 综合技术指标得分 - 确保不超过25分
-        # 优化：RSI和MACD指标权重最高，KDJ次之，ADX权重较低
-        df['技术指标得分'] = np.minimum(rsi_score + macd_score + kdj_score + adx_score, 25)
+        # 综合技术指标得分 - 确保不超过30分
+        # RSI和MACD指标权重最高，KDJ次之，ADX权重较低
+        df['技术指标得分'] = np.minimum(rsi_score + macd_score + kdj_score + adx_score, 30)
         
         # =====================================================================
         # 4. 短线信号评分 (最高20分) - 评估短线交易信号
@@ -3626,10 +3638,10 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
         prob_score = np.zeros(len(df))
         if '次日上涨概率' in df.columns:
             # 优化：次日上涨概率阈值降低到60%，增加候选股票池
-            next_day_up_threshold = 0.6  # 原阈值为params.next_day_up_prob_threshold
+            next_day_up_threshold = 0.6  
             prob_score = np.where(
                 df['次日上涨概率'] > next_day_up_threshold,
-                (df['次日上涨概率'] - next_day_up_threshold) * 100 * 2.0,  # 增加权重
+                (df['次日上涨概率'] - next_day_up_threshold) * 10 * 2 + 6,  # 增加权重
                 0
             )
             prob_score = np.minimum(prob_score, 8)  # 最高8分
@@ -3679,7 +3691,7 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
         oversold_score = np.zeros(len(df))
         if 'RSI' in df.columns:
             # RSI从超卖区反弹 - 连续两天在超卖区后回升
-            oversold_rebound = (df['RSI'] > 30) & (df['RSI'].shift(1) <= 30) & (df['RSI'].shift(2) <= 30)
+            oversold_rebound = (df['RSI'] > 30) & (df['RSI'].shift(1) <= 35) & (df['RSI'].shift(2) <= 30)
             oversold_score = np.where(oversold_rebound, 3, 0)
         
         # 6.2 突破信号 (0-2分) - 价格突破关键均线或阻力位
@@ -3709,7 +3721,7 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
                 0
             )
             
-            # 新增：涨停风险评估
+            # 涨停风险评估
             if '涨停风险' in df.columns:
                 # 高风险涨停股减分，低风险涨停股加分
                 risk_adjustment = np.where(
@@ -3717,7 +3729,7 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
                     -2,  # 高风险减分
                     np.where(
                         df['涨停风险'] == '低',
-                        2,  # 低风险加分
+                        1,  # 低风险加分
                         0   # 中等风险不调整
                     )
                 )
@@ -3728,7 +3740,7 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
         df['涨停概率得分'] = limit_up_score
         
         # =====================================================================
-        # 8. 新增: 连续上涨得分 (最高5分) - 评估连续上涨趋势
+        # 8. 续上涨得分 (最高5分) - 评估连续上涨趋势
         # =====================================================================
         consecutive_up_score = np.zeros(len(df))
         if 'Close' in df.columns:
@@ -3750,14 +3762,14 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
                         2,  # 连续3天上涨，低分
                         np.where(
                             up_days >= 4,
-                            0,  # 连续4天以上不加分
+                            1,  # 连续4天以上不加分
                             0   # 不上涨不加分
                         )
                     )
                 )
             )
             
-            # 新增：上涨幅度因素，温和上涨更可能持续
+            # 上涨幅度因素，温和上涨更可能持续
             if len(df) >= 3:
                 # 计算最近2天的累计涨幅
                 two_day_gain = (df['Close'] / df['Close'].shift(2) - 1) * 100
@@ -3765,13 +3777,13 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
                 # 温和上涨(1%-4%)更可能持续，过度上涨可能回调
                 gain_score = np.where(
                     (two_day_gain > 1) & (two_day_gain <= 4),
-                    2,  # 温和上涨，加分
+                    5,  # 温和上涨，加分
                     np.where(
                         (two_day_gain > 4) & (two_day_gain <= 7),
-                        1,  # 较大涨幅，小幅加分
+                        3,  # 较大涨幅，小幅加分
                         np.where(
                             two_day_gain > 7,
-                            -1,  # 过度上涨，减分
+                            -2,  # 过度上涨，减分
                             0    # 不上涨或微涨不加分
                         )
                     )
@@ -3779,7 +3791,7 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
                 
                 # 合并上涨天数得分和涨幅得分
                 consecutive_up_score = consecutive_up_score + gain_score
-                consecutive_up_score = np.maximum(0, np.minimum(consecutive_up_score, 5))  # 确保在0-5分范围内
+                consecutive_up_score = np.maximum(0, np.minimum(consecutive_up_score, 10))  # 确保在0-5分范围内
         
         df['连续上涨得分'] = consecutive_up_score
         
@@ -3787,7 +3799,7 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
         # 计算综合得分 - 各维度得分加权求和（优化版）
         # =====================================================================
         
-        # 基础分20分（降低基础分），各维度得分加权求和
+        # 各维度得分加权求和
         # 短线交易优化权重分配 - 重视短线交易相关指标
         # 确保各维度得分都存在，如果不存在则使用0
         price_score = df.get('价格趋势得分', pd.Series([0.0] * len(df)))
@@ -3801,23 +3813,23 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
         
         # 使用优化后的权重计算 - 提高短线和涨停相关指标权重
         df['股票得分'] = 0.0 + \
-                      price_score * 0.8 + \
-                      volume_score * 1.2 + \
-                      tech_score * 0.9 + \
-                      signal_score * 2.0 + \
-                      market_score * 0.3 + \
-                      reversal_score * 1.5 + \
-                      limit_up_score * 2.5 + \
-                      consecutive_up_score * 1.0
+                      price_score * 1.0 + \
+                      volume_score * 1.0 + \
+                      tech_score * 1.0 + \
+                      signal_score * 1.0 + \
+                      market_score * 2.0 + \
+                      reversal_score * 1.0 + \
+                      limit_up_score * 0.5 + \
+                      consecutive_up_score * 0.5
         
         # 确保得分在0-100之间，并处理可能的NaN值
-        df['股票得分'] = df['股票得分'].fillna(20.0).clip(0, 120)
+        df['股票得分'] = df['股票得分'].fillna(20.0).clip(0, 140)
         
         #计算次日上涨概率评级（优化版）
         df['上涨潜力'] = '低'
-        df.loc[df['股票得分'] > 65, '上涨潜力'] = '中'  # 降低中等潜力的阈值
-        df.loc[df['股票得分'] > 78, '上涨潜力'] = '高'  # 降低高潜力的阈值
-        df.loc[df['股票得分'] > 88, '上涨潜力'] = '极高'  # 降低极高潜力的阈值
+        df.loc[df['股票得分'] > 100, '上涨潜力'] = '中'  # 降低中等潜力的阈值
+        df.loc[df['股票得分'] > 110, '上涨潜力'] = '高'  # 降低高潜力的阈值
+        df.loc[df['股票得分'] > 120, '上涨潜力'] = '极高'  # 降低极高潜力的阈值
         
     except Exception as e:
         logging.error(f"计算股票得分失败: {str(e)}")
