@@ -163,8 +163,8 @@ class Datasr(metaclass=Singleton):
     """
     DEFAULT_CONFIG = {
         "cache_expiry_minutes": Constants.CACHE_EXPIRY_MINUTES,
-        "max_retries": 1,# 最大重试次数
-        "retry_delay": 2,# 重试延迟时间
+        "max_retries": 2,# 最大重试次数
+        "retry_delay": 1,# 重试延迟时间
         "min_data_ratio": 0.5,# 最小数据比例
         "default_days": 180   # 默认获取180天
     }
@@ -265,6 +265,7 @@ class Datasr(metaclass=Singleton):
         cache_path = self._get_cache_path(symbol, days)
         
         try:
+            time.sleep(0.1) # 初始延时（防止连续调用）
             # 1. 加载缓存并检查是否需要更新,如果不需要更新，直接返回缓存数据
             cached_df, should_update = self._load_from_cache(symbol, cache_path)
             if not should_update and not cached_df.empty:
@@ -272,11 +273,14 @@ class Datasr(metaclass=Singleton):
                 return cached_df
             
             # 2. 决定获取数据的范围
-            fetch_days = 5 if not cached_df.empty else days
-            self.logger.info(f"获取 {symbol} 数据 (模式: {'增量替换' if fetch_days==5 else '全量'}, 天数: {fetch_days})")
+            fetch_days = 30 if not cached_df.empty else days
+            self.logger.info(f"获取 {symbol} 数据 (模式: {'增量替换' if fetch_days==30 else '全量'}, 天数: {fetch_days})")
             
             # 3. 获取并处理新数据
+            time.sleep(0.1)# 网络请求前的延时
             raw_df = self._fetch_from_source(symbol, fetch_days)
+            time.sleep(0.1)# 网络请求后的延时
+
             if raw_df.empty:
                 self.logger.warning(f"获取 {symbol} 数据失败")
                 return cached_df if not cached_df.empty else pd.DataFrame()
@@ -285,7 +289,8 @@ class Datasr(metaclass=Singleton):
             
             # 4. 合并数据
             result_df = self._merge_data(cached_df, new_df, days)
-            
+            time.sleep(0.1)# 数据操作后的延时
+
             # 5. 数据质量验证
             result_df = self._validate_data_quality(result_df, days, min_data_ratio, symbol)
             
@@ -404,17 +409,17 @@ class Datasr(metaclass=Singleton):
         # 检查缓存是否有效
         if self._is_industry_cache_valid(cache_path):
             try:
-                with open(cache_path, 'r', encoding='utf-8-sig') as f:
+                with open(cache_path, 'r', encoding='utf-8') as f:
                     cached_data = json.load(f)
                     self.logger.info(f"从缓存加载股票{symbol}的行业数据")
                     return cached_data
             except Exception as e:
                 self.logger.warning(f"读取行业数据缓存失败: {str(e)}，重新获取数据")
-        
+        time.sleep(0.1)
         # 获取行业基本信息
         try:
             # akshare 文档调用东方财富接口：个股信息
-            info_hy = self._fetch_with_retry(ak.stock_individual_info_em(symbol=symbol))
+            info_hy = ak.stock_individual_info_em(symbol=symbol)
             # 提取行业信息
             industry_hy = info_hy[info_hy['item'] == '行业']
             # 确保行业信息存在
@@ -423,7 +428,8 @@ class Datasr(metaclass=Singleton):
                 industry_name = industry_hy['value'].iloc[0]
                 # 确保行业名称不为空
                 result['industry_name'] = industry_name
-            # 获取行业涨跌幅数据
+                # 获取行业涨跌幅数据
+                time.sleep(0.1)
                 try:
                     # akshare 文档调用东方财富接口
                     info_hyzf = ak.stock_hsgt_board_rank_em(
@@ -431,21 +437,21 @@ class Datasr(metaclass=Singleton):
                         indicator="今日"
                     )
                     # 提取匹配的行业数据
-                    industry_hyzf = info_hyzf[info_hyzf['名称'] == industry_name]['最新涨跌幅'].values
+                    industry_hyzf = info_hyzf[info_hyzf['名称'] == industry_name]['最新涨跌幅']
                     # 确保数据不为空
-                    if len(industry_hyzf) > 0:
-                        result['industry_change'] = float(industry_hyzf[0])
+                    if not industry_hyzf.empty:
+                        result['industry_change'] = float(industry_hyzf.iloc[0])
                 except Exception as e:
                     self.logger.warning(f"获取股票{symbol}行业涨跌幅数据失败: {str(e)}")
             else:
                 self.logger.warning(f"股票 {symbol} 未知行业")
         except Exception as e:
             self.logger.warning(f"获取股票{symbol}所属行业数据失败: {str(e)}")
-        
+        time.sleep(0.1)
         # 保存缓存
         try:
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            with open(cache_path, 'w', encoding='utf-8-sig') as f:
+            with open(cache_path, 'w', encoding='utf-8') as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
             os.utime(cache_path, None)  # 更新修改时间
             self.logger.debug(f"行业数据缓存已更新: {cache_path}")
@@ -4474,8 +4480,9 @@ def generate_report(target_stocks: List[List[str]], tech: TechnicalIndicators, p
     
     # 12. 输出结果
     print(f"\n短线交易选股报告已生成：{report_file}")
-    print("\n前100只推荐股票：")
+    print("\n排名前100只推荐股票：")
     
+    '''
     # 创建不同的展示视图
     # 12.1. 基础信息视图
     basic_columns = ["代码", "名称", "得分", "上涨潜力", "短线买入信号", "次日上涨概率", "涨停概率"]
@@ -4496,17 +4503,17 @@ def generate_report(target_stocks: List[List[str]], tech: TechnicalIndicators, p
     trade_columns = ["代码", "名称", "得分", "上涨潜力", "触发价", "次日目标价", "次日目标涨幅%", "次日止损价"]
     print("\n=== 交易决策视图 ===")
     print(report_df[trade_columns].to_string(index=False))
-    
+    '''
     # 13. 输出高级交易建议
     print("\n=== 交易建议 ===")
     
     # 13.1. 强烈信号股票 - 优化选股标准
-    strong_signals = report_df[(report_df["信号强度"] >= 8) | (report_df["上涨潜力"] == "极高") | ((report_df["信号强度"] >= 7) & (report_df["涨停概率"] >= 50))]
+    strong_signals = report_df[(report_df["信号强度"] >= 12) | (report_df["上涨潜力"] == "高") | ((report_df["信号强度"] >= 10) & (report_df["涨停概率"] >= 60))]
     if not strong_signals.empty:
         print(f"🔥 强烈推荐（{len(strong_signals)}只）：{', '.join([f'{code}({name})' for code, name in zip(strong_signals['代码'], strong_signals['名称'])])}")
     
     # 13.2. 不错信号股票 - 优化选股标准
-    medium_signals = report_df[(report_df["上涨潜力"] == "高") | ((report_df["信号强度"] >= 6) & (report_df["涨停概率"] >= 30)) & ~report_df.index.isin(strong_signals.index)]
+    medium_signals = report_df[(report_df["上涨潜力"] == "中") | ((report_df["信号强度"] >= 10) & (report_df["涨停概率"] >= 40)) & ~report_df.index.isin(strong_signals.index)]
     if not medium_signals.empty:
         print(f"👍 建议关注（{len(medium_signals)}只）：{', '.join([f'{code}({name})' for code, name in zip(medium_signals['代码'], medium_signals['名称'])])}")
     
@@ -4543,7 +4550,7 @@ if __name__ == "__main__":
     # 2. 初始化交易参数（可根据需要调整参数）
     params = TradingParams()
     
-    # 3. 获取目标股票（仅保留以 "" 开头的股票）
+    # 3. 获取目标股票（仅保留筛选的股票）
     print("正在获取目标股票列表...")
     target_stocks = tech_indicators.get_target_stocks()
     
@@ -4559,7 +4566,8 @@ if __name__ == "__main__":
         if result_df is not None and not result_df.empty:
             buy_signals = result_df[result_df['短线买入信号'] == True]
             high_potential = result_df[result_df['上涨潜力'].isin(['高', '极高'])]
-            print(f"\n总结: 共有{len(buy_signals)}只股票触发买入信号，{len(high_potential)}只股票上涨潜力高")
+            print("\n=== 总结 ===")
+            print(f"\n共有{len(buy_signals)}只股票触发买入信号，{len(high_potential)}只股票上涨潜力高")
             print(f"平均目标涨幅: {buy_signals['次日目标涨幅%'].mean():.2f}%")
             print("\n选股完成! 祝交易顺利!")
         

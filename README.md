@@ -20,36 +20,24 @@
    ```bash
    pip install -r requirements.txt
    ```
-   3.建议使用代理运行 4.直接启动生成 100 排名报告
+   3.建议使用代理运行
+4.直接启动生成 100 排名报告
 
 ## 使用示例
-
-（假设后续会有 main.py 或 notebook）
-
-```python
-import akshare as ak
-# 示例：获取某只股票的财务数据
-data = ak.stock_financial_report_sina(stock='sh600000')
-print(data)
-# 结合自定义打分逻辑进行分析
-```
+无
 
 ## 依赖说明
 
-- Python 3.7+
+- Python 12.7等等
 - akshare
 - TA-Lib
 - numpy
 - pandas
 - pytz
 
-## 贡献方式
-
-欢迎提交 issue 或 pull request 参与项目改进。
-
 ## 联系方式
 
-如有问题或建议，请通过 issue 联系作者。
+如有问题或建议，请通过未知名方式联系作者。
 
 # 股票得分计算函数 (calculate_stock_score)
 
