@@ -3918,7 +3918,7 @@ def generate_report(target_stocks: List[List[str]], tech: TechnicalIndicators, p
         
         # 6. 计算信号强度 - 综合多个指标判断信号可靠性
         signal_strength = 0
-        if latest.get('短线买入信号', False):
+        if not latest.get('短线买入信号', False):
             # 基础分5分
             signal_strength = 5
             

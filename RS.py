@@ -1,4 +1,4 @@
-#2.1
+#3.0
 # 优化得分计算和权重设置
 # -*- coding: utf-8 -*-
 
@@ -35,16 +35,19 @@
 import os
 import sys
 import time
-import datetime
-import pytz
-from datetime import date, datetime, time as datetime_time
+import multiprocessing
 import json
 import logging
 import traceback
 import threading
+import datetime
+import random
+
+from datetime import date, datetime, time as datetime_time
 from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union, Callable
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -164,7 +167,7 @@ class Datasr(metaclass=Singleton):
     DEFAULT_CONFIG = {
         "cache_expiry_minutes": Constants.CACHE_EXPIRY_MINUTES,
         "max_retries": 2,# 最大重试次数
-        "retry_delay": 1,# 重试延迟时间
+        "retry_delay": 4,# 重试延迟时间
         "min_data_ratio": 0.5,# 最小数据比例
         "default_days": 180   # 默认获取180天
     }
@@ -273,27 +276,29 @@ class Datasr(metaclass=Singleton):
                 return cached_df
             
             # 2. 决定获取数据的范围
-            fetch_days = 30 if not cached_df.empty else days
-            self.logger.info(f"获取 {symbol} 数据 (模式: {'增量替换' if fetch_days==30 else '全量'}, 天数: {fetch_days})")
+            fetch_days = 3 if not cached_df.empty else days
+            self.logger.info(f"获取 {symbol} 数据 (模式: {'增量替换' if fetch_days==3 else '全量'}, 天数: {fetch_days})")
             
             # 3. 获取并处理新数据
-            time.sleep(0.1)# 网络请求前的延时
+            time.sleep(0.1)
             raw_df = self._fetch_from_source(symbol, fetch_days)
-            time.sleep(0.1)# 网络请求后的延时
 
             if raw_df.empty:
                 self.logger.warning(f"获取 {symbol} 数据失败")
                 return cached_df if not cached_df.empty else pd.DataFrame()
             
+            time.sleep(0.1)
             new_df = self._preprocess_data(raw_df)
-            
+
+            time.sleep(0.1)
             # 4. 合并数据
             result_df = self._merge_data(cached_df, new_df, days)
-            time.sleep(0.1)# 数据操作后的延时
 
+            time.sleep(0.1)
             # 5. 数据质量验证
             result_df = self._validate_data_quality(result_df, days, min_data_ratio, symbol)
             
+            time.sleep(0.1)
             # 6. 保存缓存
             if not result_df.empty:
                 try:
@@ -415,7 +420,10 @@ class Datasr(metaclass=Singleton):
                     return cached_data
             except Exception as e:
                 self.logger.warning(f"读取行业数据缓存失败: {str(e)}，重新获取数据")
-        time.sleep(0.1)
+
+        random_delay = 2 + random.uniform(0.1, 0.9)
+        time.sleep(random_delay)
+        
         # 获取行业基本信息
         try:
             # akshare 文档调用东方财富接口：个股信息
@@ -429,7 +437,6 @@ class Datasr(metaclass=Singleton):
                 # 确保行业名称不为空
                 result['industry_name'] = industry_name
                 # 获取行业涨跌幅数据
-                time.sleep(0.1)
                 try:
                     # akshare 文档调用东方财富接口
                     info_hyzf = ak.stock_hsgt_board_rank_em(
@@ -481,11 +488,16 @@ class Datasr(metaclass=Singleton):
 
     def _fetch_from_source(self, symbol: str, days: int) -> pd.DataFrame:
         """
-        从 akshare 数据源获取股票日线数据，支持备用接口。
+        从 akshare 数据源获取股票日线数据。
         """
         end_date = datetime.now()
         start_date_str = (end_date - timedelta(days=days)).strftime("%Y%m%d")
         self.logger.info(f"正在获取 {symbol} {days}天历史数据")
+        
+        # 添加随机延迟避免请求过于频繁
+        random_delay = 5 + random.uniform(0.1, 0.9)
+        time.sleep(random_delay)
+        #qfq前复权
         try:
             df = self._fetch_with_retry(
                 ak.stock_zh_a_hist,
@@ -496,11 +508,11 @@ class Datasr(metaclass=Singleton):
                 adjust=""
             )
             if df.empty:
-                self.logger.warning("主接口数据为空")
+                self.logger.warning("ak.stock_zh_a_his接口获取股票数据为空")
                 return pd.DataFrame()
             return df
         except Exception as e:
-            self.logger.warning(f"接口异常: {str(e)}，获取数据失败")
+            self.logger.warning(f"接口异常: {str(e)}，获取股票数据失败")
             return pd.DataFrame()    
 
     def _preprocess_data(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -2365,7 +2377,7 @@ class TechnicalIndicators:
     @staticmethod
     def _calculate_buy_signals(df: pd.DataFrame, params: TradingParams, data_len: int) -> pd.DataFrame:
         """
-        计算短线买入信号 - 优化版本
+        计算短线买入信号
         
         通过综合多种技术指标和形态特征，识别第二天可能上涨的股票。
         关注点：
@@ -2538,7 +2550,7 @@ class TechnicalIndicators:
     @staticmethod
     def _calculate_next_day_prediction(df: pd.DataFrame, close: np.ndarray, data_len: int) -> pd.DataFrame:
         """
-        计算次日目标价和涨幅预测 - 优化版本
+        计算次日目标价和涨幅预测
         
         通过分析历史波动率、价格趋势和技术指标状态，
         更准确地预测第二天可能的目标价格和涨幅。
@@ -4241,301 +4253,289 @@ def calculate_stock_score(df: pd.DataFrame, params: TradingParams) -> pd.DataFra
     return df
 
 # =============================================================================
-# 报告生成函数 
+# 报告生成 
 # =============================================================================
-def generate_report(target_stocks: List[List[str]], tech: TechnicalIndicators, params: TradingParams):
-    """
-    遍历目标股票，获取数据、计算技术指标和综合得分，
-    最后根据得分排名，生成得分前50的股票报告（CSV文件）。
-    
-    报告中包含：
-      - 基本信息：代码、名称、行业、行业涨幅%
-      - 价格信息：最新收盘价、收盘强度、量比、换手率
-      - 技术指标：RSI、MACD、ADX、CCI等
-      - 交易信号：得分、短线买入信号、信号强度、涨停概率
-      - 交易参考：触发价、次日目标价、次日目标涨幅%、次日止损价、止损幅度%
-      - K线形态：主要看涨形态识别结果
-    """
-    # 初始化报告列表和线程锁
-    report = []
-    report_lock = threading.Lock()
-    s_rD = tech.s_rD
-    
-    # 记录处理开始时间
-    start_time = time.time()
-    print(f"开始处理{len(target_stocks)}只目标股票...")
-    
-    # 定义处理单个股票的函数
-    def process_stock(idx, stock_item):
-        # 确保stock_item是列表或元组，并且包含两个元素
-        if not isinstance(stock_item, (list, tuple)) or len(stock_item) < 2:
-            print(f"警告: 股票项 #{idx} 格式错误，跳过处理")
-            return None
+
+
+def calculate_signal_strength(latest):
+    """计算信号强度"""
+    signal_strength = 0
+    if not latest.get('短线买入信号', False):
+        return 0
+    # 基础分分
+    signal_strength = 4
+    # 使用列表推导式和any函数优化条件判断
+    conditions = [
+        40 < latest.get('RSI', 0) < 65,  # RSI在理想区间
+        latest.get('MACD_Hist', 0) > 0,  # MACD柱状图为正
+        latest.get('次日上涨概率', 0) > 0.7,  # 上涨概率高
+        latest.get('收盘强度', 0) > 0.7,  # 收盘强度高
+        latest.get('ADX', 0) > 25 and latest.get('PLUS_DI', 0) > latest.get('MINUS_DI', 0),  # ADX趋势强且多头方向
+        latest.get('CCI', 0) > -100 and latest.get('CCI', 0) < 100,  # CCI在理想区间
+        latest.get('MFI', 0) > 20 and latest.get('MFI', 0) < 70,  # MFI在理想区间
+        latest.get('CMF', 0) > 0  # CMF为正，资金流入
+    ]
+    # 为每个符合的条件加分
+    scores = [1, 1, 2, 1, 1, 1, 1, 1]
+    signal_strength += sum(score for condition, score in zip(conditions, scores) if condition)
+    # K线形态加分 - 使用any替代循环检查
+    bullish_patterns = ['Pattern_Hammer', 'Pattern_MorningStar', 'Pattern_3WhiteSoldiers', 'Pattern_InvertedHammer']
+    if any(latest.get(pattern, False) for pattern in bullish_patterns):
+        signal_strength += 2
             
-        code, name = stock_item[0], stock_item[1]
+    return signal_strength
+    
+def get_bullish_patterns(latest):
+    """提取关键K线形态"""
+        # 使用字典映射模式名称
+    pattern_mapping = {
+        'Pattern_Hammer': '锤子线', 
+        'Pattern_MorningStar': '晨星', 
+        'Pattern_3WhiteSoldiers': '三白兵',
+        'Pattern_Engulfing': '吞没', 
+        'Pattern_InvertedHammer': '倒锤',
+        'Pattern_DragonflyDoji': '蜻蜓十字'
+    }
+    # 使用列表推导式获取存在的形态
+    bullish_patterns = [pattern_mapping[key] for key in pattern_mapping if latest.get(key, False)]
+    
+    return '、'.join(bullish_patterns) if bullish_patterns else '无'
+# 报告项构建函数
+def build_report_item(code, name, latest, industry_data):
+    """构建单个股票的报告项"""
+    # 获取行业信息
+    industry_name = industry_data.get('industry', '未知行业')
+    industry_change = industry_data.get('industry_change', 0.0)
+    
+    # 基本信息
+    result = {
+        "代码": code,
+        "名称": name,
+        "行业": industry_name,
+        "行业涨幅%": round(industry_change * 100, 2),
         
-        # 每处理30只股票显示一次进度（使用锁确保输出不混乱）
-        if idx % 30 == 0 and idx > 0:
-            with report_lock:
-                elapsed = time.time() - start_time
-                print(f"已处理 {idx}/{len(target_stocks)} 只股票，耗时 {elapsed:.1f}秒")
+        # 价格信息
+        "最新收盘价": round(latest['Close'], 2),
+        "收盘强度": round(latest.get('收盘强度', 0), 2),
+        "量比": round(latest.get('量比', 0), 2),
+        "换手率": round(latest.get('Turnover', 0), 2),
         
-        # 1. 获取股票历史数据
+        # 技术指标
+        "RSI": round(latest.get('RSI', 0), 1),
+        "MACD": round(latest.get('MACD', 0), 3),
+        "ADX": round(latest.get('ADX', 0), 1),
+        "KDJ_J": round(latest.get('J', 0), 1) if 'J' in latest else None,
+        "MFI": round(latest.get('MFI', 0), 1) if 'MFI' in latest else None,
+        
+        # 交易信号
+        "得分": round(latest.get('股票得分', 0), 1),
+        "上涨潜力": latest.get('上涨潜力', '低'),  # 新增上涨潜力评级
+        "短线买入信号": latest.get('短线买入信号', False),
+        "信号强度": calculate_signal_strength(latest),
+        "次日上涨概率": round(latest.get('次日上涨概率', 0), 2),
+        "涨停概率": round(latest.get('涨停概率', 0), 1),
+        "涨停风险": latest.get('涨停风险', '低'),
+        
+        # 分项得分
+        "价格趋势得分": round(latest.get('价格趋势得分', 0), 1),
+        "量能得分": round(latest.get('量能得分', 0), 1),
+        "技术指标得分": round(latest.get('技术指标得分', 0), 1),
+        "短线信号得分": round(latest.get('短线信号得分', 0), 1),
+        "市场因素得分": round(latest.get('市场因素得分', 0), 1),
+        "反转信号得分": round(latest.get('反转信号得分', 0), 1),
+        "涨停概率得分": round(latest.get('涨停概率得分', 0), 1),
+        "连续上涨得分": round(latest.get('连续上涨得分', 0), 1),  
+        
+        # 交易参考
+        "触发价": round(latest['Close'], 2),
+        "次日目标价": round(latest.get('次日目标价', latest['Close'] * 1.02), 2),
+        "次日目标涨幅%": round(latest.get('次日目标涨幅', 2.0), 2),
+        "次日止损价": round(latest.get('次日止损价', latest['Close'] * 0.99) if not pd.isna(latest.get('次日止损价', None)) else latest['Close'] * 0.99, 2),
+        "止损幅度%": round(latest.get('次日止损幅度', 1.0) if not pd.isna(latest.get('次日止损幅度', None)) else 1.0, 2),
+        
+        # K线形态
+        "看涨形态": get_bullish_patterns(latest),
+        "K线形态评分": int(latest.get('Pattern_Score', 0)),
+        
+        # 资金流向
+        "资金流向": "流入" if latest.get('CMF', 0) > 0 else "流出",
+        
+        # 趋势与反转
+        "趋势强度": latest.get('趋势强度', 'Unknown') if '趋势强度' in latest else None,
+        "反转信号": latest.get('反转信号', False),
+        
+        # 均线系统
+        "均线多头排列": (latest.get('MA5', 0) > latest.get('MA10', 0) and latest.get('MA10', 0) > latest.get('MA20', 0)) if all(col in latest for col in ['MA5', 'MA10', 'MA20']) else False,
+        "站上均线系统": (latest.get('Close', 0) > latest.get('MA5', 0) and latest.get('Close', 0) > latest.get('MA10', 0) and latest.get('Close', 0) > latest.get('MA20', 0)) if all(col in latest for col in ['MA5', 'MA10', 'MA20']) else False,
+    }
+    
+    return result
+#统一的数据获取函数
+def fetch_stock_data(stock_item, s_rD):
+    """获取单只股票的数据"""
+    code, name = stock_item[0], stock_item[1]
+    try:
         df = s_rD.fetch_data(code)
-        if not isinstance(df, pd.DataFrame) or df.empty:
-            print(f"警告: 股票 {code}({name}) 数据获取失败或为空")
-            return None
-            
-        # 2. 计算技术指标
-        try:
-            df = tech.calculate_all(df, params)
-            if not isinstance(df, pd.DataFrame):
-                print(f"警告: 股票 {code}({name}) 技术指标计算结果非DataFrame类型")
-                return None
-        except Exception as e:
-            print(f"错误: 股票 {code}({name}) 技术指标计算失败 - {str(e)}")
-            return None
-            
-        # 3. 计算综合得分
-        try:
-            df = calculate_stock_score(df, params)
-        except Exception as e:
-            print(f"错误: 股票 {code}({name}) 得分计算失败 - {str(e)}")
-            return None
-        
-        # 4. 获取最新一天数据
+        industry_data = s_rD.get_stock_industry_data(code)
+        return (code, name, df, industry_data)
+    except Exception as e:
+        print(f"获取股票 {code}({name}) 数据失败: {str(e)}")
+        return (code, name, None, None)
+# 统一的指标计算函数
+def process_indicators(data_tuple, tech, params):
+    """计算技术指标并生成报告项"""
+    code, name, df, industry_data = data_tuple
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    
+    try:
+        # 计算指标
+        df = tech.calculate_all(df, params)
+        time.sleep(0.1)
+        df = calculate_stock_score(df, params)
         latest = df.iloc[-1]
         
-        # 5. 获取股票所属行业和行业涨幅
-        try:
-            industry_data = s_rD.get_stock_industry_data(code)
-            industry_name = industry_data["industry_name"]
-            industry_change = industry_data["industry_change"]
-        except Exception as e:
-            print(f"警告: 获取股票{code}({name})行业数据失败 - {str(e)}")
-            industry_name = "未知行业"
-            industry_change = 0.0
+        # 生成报告项
+        return build_report_item(code, name, latest, industry_data)
+    except Exception as e:
+        print(f"处理股票 {code}({name}) 指标失败: {str(e)}")
+        return None
+
+# 进度跟踪装饰器
+def with_progress(total):
+    """进度跟踪装饰器"""
+    def decorator(func):
+        counter = [0]
+        start_time = time.time()
+        lock = threading.Lock()
         
-        # 6. 计算信号强度 - 综合多个指标判断信号可靠性
-        signal_strength = 0
-        if latest.get('短线买入信号', False):
-            # 基础分5分
-            signal_strength = 5
+        def wrapper(*args, **kwargs):
+            result = func(*args, **kwargs)
             
-            # 技术指标加分
-            if latest.get('RSI', 0) > 40 and latest.get('RSI', 0) < 65:
-                signal_strength += 1  # RSI在理想区间
-            if latest.get('MACD_Hist', 0) > 0:
-                signal_strength += 1  # MACD柱状图为正
-            if latest.get('次日上涨概率', 0) > 0.7:
-                signal_strength += 2  # 上涨概率高
+            with lock:
+                counter[0] += 1
+                current = counter[0]
             
-            # 价格形态加分
-            if latest.get('收盘强度', 0) > 0.7:
-                signal_strength += 1  # 收盘强度高
-                
-            # ADX和CCI指标加分
-            if latest.get('ADX', 0) > 25 and latest.get('PLUS_DI', 0) > latest.get('MINUS_DI', 0):
-                signal_strength += 1  # ADX趋势强且多头方向
-            if latest.get('CCI', 0) > -100 and latest.get('CCI', 0) < 100:
-                signal_strength += 1  # CCI在理想区间
-                
-            # K线形态加分
-            pattern_bullish = False
-            for pattern in ['Pattern_Hammer', 'Pattern_MorningStar', 'Pattern_3WhiteSoldiers', 'Pattern_InvertedHammer']:
-                if latest.get(pattern, False):
-                    pattern_bullish = True
-                    break
-            if pattern_bullish:
-                signal_strength += 2  # 存在看涨K线形态
-                
-            # 资金流指标加分
-            if latest.get('MFI', 0) > 20 and latest.get('MFI', 0) < 70:
-                signal_strength += 1  # MFI在理想区间
-            if latest.get('CMF', 0) > 0:
-                signal_strength += 1  # CMF为正，资金流入
-        
-        # 7. 提取关键K线形态
-        bullish_patterns = []
-        for pattern_name, display_name in [
-            ('Pattern_Hammer', '锤子线'), 
-            ('Pattern_MorningStar', '晨星'), 
-            ('Pattern_3WhiteSoldiers', '三白兵'),
-            ('Pattern_Engulfing', '吞没'), 
-            ('Pattern_InvertedHammer', '倒锤'),
-            ('Pattern_DragonflyDoji', '蜻蜓十字')
-        ]:
-            if latest.get(pattern_name, False):
-                bullish_patterns.append(display_name)
-        
-        pattern_text = '、'.join(bullish_patterns) if bullish_patterns else '无'
+            print(f"\r进度: {current}/{total} [{current/total*100:.1f}%]", end="")
+            if current % 30 == 0 or current == total:
+                elapsed_time = time.time() - start_time
+                print(f"\n已处理{current}只股票，耗时{elapsed_time:.2f}秒")
             
-        # 8. 构建结果字典 - 包含所有关键信息
-        result = {
-            # 基本信息
-            "代码": code,
-            "名称": name,
-            "行业": industry_name,
-            "行业涨幅%": round(industry_change, 2),
-            
-            # 价格信息
-            "最新收盘价": round(latest['Close'], 2),
-            "收盘强度": round(latest.get('收盘强度', 0), 2),
-            "量比": round(latest.get('量比', 0), 2),
-            "换手率": round(latest.get('Turnover', 0), 2),
-            
-            # 技术指标
-            "RSI": round(latest.get('RSI', 0), 1),
-            "MACD": round(latest.get('MACD', 0), 3),
-            "ADX": round(latest.get('ADX', 0), 1),
-            "KDJ_J": round(latest.get('J', 0), 1) if 'J' in latest else None,
-            "MFI": round(latest.get('MFI', 0), 1) if 'MFI' in latest else None,
-            
-            # 交易信号
-            "得分": round(latest.get('股票得分', 0), 1),
-            "上涨潜力": latest.get('上涨潜力', '低'),  # 新增上涨潜力评级
-            "短线买入信号": latest.get('短线买入信号', False),
-            "信号强度": signal_strength,
-            "次日上涨概率": round(latest.get('次日上涨概率', 0), 2),
-            "涨停概率": round(latest.get('涨停概率', 0), 1),
-            "涨停风险": latest.get('涨停风险', '低'),
-            
-            # 分项得分
-            "价格趋势得分": round(latest.get('价格趋势得分', 0), 1),
-            "量能得分": round(latest.get('量能得分', 0), 1),
-            "技术指标得分": round(latest.get('技术指标得分', 0), 1),
-            "短线信号得分": round(latest.get('短线信号得分', 0), 1),
-            "市场因素得分": round(latest.get('市场因素得分', 0), 1),
-            "反转信号得分": round(latest.get('反转信号得分', 0), 1),
-            "涨停概率得分": round(latest.get('涨停概率得分', 0), 1),
-            "连续上涨得分": round(latest.get('连续上涨得分', 0), 1),  # 新增连续上涨得分
-            
-            # 交易参考
-            "触发价": round(latest['Close'], 2),
-            "次日目标价": round(latest.get('次日目标价', latest['Close'] * 1.02), 2),
-            "次日目标涨幅%": round(latest.get('次日目标涨幅', 2.0), 2),
-            "次日止损价": round(latest.get('次日止损价', latest['Close'] * 0.99) if not pd.isna(latest.get('次日止损价', None)) else latest['Close'] * 0.99, 2),
-            "止损幅度%": round(latest.get('次日止损幅度', 1.0) if not pd.isna(latest.get('次日止损幅度', None)) else 1.0, 2),
-            
-            # K线形态
-            "看涨形态": pattern_text,
-            "K线形态评分": int(latest.get('Pattern_Score', 0)),
-            
-            # 资金流向
-            "资金流向": "流入" if latest.get('CMF', 0) > 0 else "流出",
-            
-            # 趋势与反转
-            "趋势强度": latest.get('趋势强度', 'Unknown') if '趋势强度' in latest else None,
-            "反转信号": latest.get('反转信号', False),
-            
-            # 均线系统
-            "均线多头排列": (latest.get('MA5', 0) > latest.get('MA10', 0) and latest.get('MA10', 0) > latest.get('MA20', 0)) if all(col in latest for col in ['MA5', 'MA10', 'MA20']) else False,
-            "站上均线系统": (latest.get('Close', 0) > latest.get('MA5', 0) and latest.get('Close', 0) > latest.get('MA10', 0) and latest.get('Close', 0) > latest.get('MA20', 0)) if all(col in latest for col in ['MA5', 'MA10', 'MA20']) else False,
-        }
-        
-        return result
+            return result
+        return wrapper
+    return decorator
+
+def generate_report(target_stocks: List[List[str]], tech: TechnicalIndicators, params: TradingParams):
+    """生成股票报告"""
+    # 初始化
+    report = []
+    s_rD = tech.s_rD
+    total_stocks = len(target_stocks)
+    print(f"开始处理{total_stocks}只目标股票...")
     
-    # 确定线程数量 - 使用CPU核心数的2倍，但不超过8个线程
-    max_workers = min(8, os.cpu_count() * 2 or 8)
-    print(f"使用{max_workers}个线程并行处理数据...")
+    # 确定并行策略
+    cpu_count = multiprocessing.cpu_count()
+    thread_workers = min(8 if total_stocks > 1000 else 4, 2*cpu_count, total_stocks)
+    print(f"使用: {thread_workers}线程")
     
-    # 使用线程池并行处理股票数据
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # 提交所有任务
-        future_to_idx = {executor.submit(process_stock, idx, stock_item): idx 
-                         for idx, stock_item in enumerate(target_stocks)}
+    # 应用进度装饰器
+    fetch_with_progress = with_progress(total_stocks)(
+        lambda stock_item: fetch_stock_data(stock_item, s_rD)
+    )
+    
+    # 统一的并行处理流程
+    with ThreadPoolExecutor(max_workers=thread_workers) as executor:
+        # 第一步：获取数据
+        raw_data = list(executor.map(fetch_with_progress, target_stocks))
         
-        # 收集结果
-        for future in as_completed(future_to_idx):
-            result = future.result()
-            if result is not None:
-                with report_lock:
-                    report.append(result)
-    
-    # 处理完成，显示耗时
-    elapsed = time.time() - start_time
-    print(f"处理完成，共处理{len(report)}/{len(target_stocks)}只股票，总耗时 {elapsed:.1f}秒")
-    
-    # 8. 转换为DataFrame并排序
-    if not report:
-        print("没有符合条件的股票！")
-        return
+        # 过滤有效数据
+        valid_data = [(code, name, df, ind_data) for code, name, df, ind_data in raw_data 
+                      if isinstance(df, pd.DataFrame) and not df.empty]
         
+        print(f"\n数据获取完成: {len(valid_data)}/{total_stocks} 只股票有效")
+        
+        # 第二步：计算指标并生成报告
+        process_with_progress = with_progress(len(valid_data))(
+            lambda data: process_indicators(data, tech, params)
+        )
+        
+        report = [result for result in executor.map(process_with_progress, valid_data) if result is not None]
+    
+    # 转换为DataFrame并排序
     report_df = pd.DataFrame(report)
-    
-    # 9. 按得分排序，取前100只股票
+    # 按得分排序，取前100只股票
     report_df = report_df.sort_values(by="得分", ascending=False).head(100)
-    
-    # 10. 生成涨停风险评级和上涨潜力分布
+    # 生成涨停风险评级和上涨潜力分布
     risk_distribution = report_df['涨停风险'].value_counts()
-    risk_high_count = risk_distribution.get('高', 0) + risk_distribution.get('极高', 0)
     potential_distribution = report_df['上涨潜力'].value_counts()
     high_potential_count = potential_distribution.get('高', 0) + potential_distribution.get('极高', 0)
-    
-    # 11. 保存报告到CSV文件
+
+    # 保存报告
     current_date = time.strftime("%Y%m%d")
-    report_file = os.path.join(Constants.BASE_DIR,"stock_r_report", f"stock_r_top100_{current_date}.csv")
-    report_df.to_csv(report_file, index=False, encoding='utf-8-sig')
+    report_path = os.path.join(Constants.BASE_DIR, "stock_r_report", f"stock_r_top100_{current_date}.csv")
+    report_df.to_csv(report_path, index=False, encoding='utf-8-sig')
     
-    # 12. 输出结果
-    print(f"\n短线交易选股报告已生成：{report_file}")
+    print(f"\n短线交易选股报告已生成：{report_path}")
     print("\n排名前100只推荐股票：")
-    
     '''
     # 创建不同的展示视图
-    # 12.1. 基础信息视图
+    # 基础信息视图
     basic_columns = ["代码", "名称", "得分", "上涨潜力", "短线买入信号", "次日上涨概率", "涨停概率"]
     print("\n=== 基础信息视图 ===")
     print(report_df[basic_columns].to_string(index=False))
     
-    # 12.2. 技术指标视图
+    # 技术指标视图
     tech_columns = ["代码", "名称", "RSI", "MACD", "KDJ_J", "ADX", "趋势强度", "看涨形态"]
     print("\n=== 技术指标视图 ===")
     print(report_df[tech_columns].to_string(index=False))
     
-    # 12.3. 分项得分视图 - 新增
+    # 分项得分视图 - 新增
     score_columns = ["代码", "名称", "价格趋势得分", "量能得分", "技术指标得分", "短线信号得分", "涨停概率得分", "连续上涨得分"]
     print("\n=== 分项得分视图 ===")
     print(report_df[score_columns].to_string(index=False))
     
-    # 12.4. 交易决策视图
+    # 交易决策视图
     trade_columns = ["代码", "名称", "得分", "上涨潜力", "触发价", "次日目标价", "次日目标涨幅%", "次日止损价"]
     print("\n=== 交易决策视图 ===")
     print(report_df[trade_columns].to_string(index=False))
     '''
-    # 13. 输出高级交易建议
+    # 输出高级交易建议
     print("\n=== 交易建议 ===")
     
-    # 13.1. 强烈信号股票 - 优化选股标准
+    # 强烈信号股票 - 优化选股标准
     strong_signals = report_df[(report_df["信号强度"] >= 12) | (report_df["上涨潜力"] == "高") | ((report_df["信号强度"] >= 10) & (report_df["涨停概率"] >= 60))]
     if not strong_signals.empty:
         print(f"🔥 强烈推荐（{len(strong_signals)}只）：{', '.join([f'{code}({name})' for code, name in zip(strong_signals['代码'], strong_signals['名称'])])}")
     
-    # 13.2. 不错信号股票 - 优化选股标准
+    # 不错信号股票 - 优化选股标准
     medium_signals = report_df[(report_df["上涨潜力"] == "中") | ((report_df["信号强度"] >= 10) & (report_df["涨停概率"] >= 40)) & ~report_df.index.isin(strong_signals.index)]
     if not medium_signals.empty:
         print(f"👍 建议关注（{len(medium_signals)}只）：{', '.join([f'{code}({name})' for code, name in zip(medium_signals['代码'], medium_signals['名称'])])}")
     
-    # 13.3. K线形态推荐
+    # K线形态推荐
     pattern_signals = report_df[report_df["看涨形态"] != "无"]
     if not pattern_signals.empty:
         pattern_signals = pattern_signals.sort_values(by="K线形态评分", ascending=False).head(5)
         print(f"📊 K线形态良好（{len(pattern_signals)}只）：{', '.join([f'{code}({name})-{pattern}' for code, name, pattern in zip(pattern_signals['代码'], pattern_signals['名称'], pattern_signals['看涨形态'])])}")
     
-    # 13.4. 涨停风险最高股票
+    # 涨停风险最高股票
     limit_up_risks = report_df[report_df["涨停风险"].isin(['高', '极高'])].sort_values(by="涨停概率", ascending=False).head(5)
     if not limit_up_risks.empty:
         print(f"🚀 涨停风险高（{len(limit_up_risks)}只）：{', '.join([f'{code}({name})-{prob}%' for code, name, prob in zip(limit_up_risks['代码'], limit_up_risks['名称'], limit_up_risks['涨停概率'])])}")
     
-    # 14. 输出市场统计分析
+    # 输出市场统计分析
     print("\n=== 市场分析 ===")
-    print(f"今日涨停风险分布: 极高({risk_distribution.get('极高', 0)}只), 高({risk_distribution.get('高', 0)}只), 中({risk_distribution.get('中', 0)}只), 低({risk_distribution.get('低', 0)}只)")
+    print(f"\n今日涨停风险分布: 极高({risk_distribution.get('极高', 0)}只), 高({risk_distribution.get('高', 0)}只), 中({risk_distribution.get('中', 0)}只), 低({risk_distribution.get('低', 0)}只)")
     print(f"上涨潜力分布: 极高({potential_distribution.get('极高', 0)}只), 高({potential_distribution.get('高', 0)}只), 中({potential_distribution.get('中', 0)}只), 低({potential_distribution.get('低', 0)}只)")
     print(f"短线交易机会指数: {high_potential_count / len(report_df) * 100:.1f}% (高上涨潜力股票占比)")
     
+    # 显示前10名
+    display_count = min(10, len(report_df))
+    for i in range(display_count):
+        row = report_df.iloc[i]
+        print(f"\n{i+1}. {row['代码']} {row['名称']} - 得分: {row['得分']} - 信号: {row['短线买入信号']}")
+    
     return report_df
-
 # =============================================================================
 # 主程序 - 短线交易选股系统入口
 # =============================================================================
@@ -4544,6 +4544,8 @@ if __name__ == "__main__":
     print("专注于识别第二天可能上涨的股票，适合短线交易")
     print("================================================\n")
     
+    start_time = time.time()
+
     # 1. 初始化技术指标计算器
     tech_indicators = TechnicalIndicators()
     
@@ -4574,3 +4576,4 @@ if __name__ == "__main__":
     print("\n================================================")
     print("提示: 本系统仅供参考，实际交易请结合市场情况和个人风险承受能力")
     print("================================================\n")
+
